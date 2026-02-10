@@ -1,3 +1,16 @@
-from .spatial_utils import plot_spatial_compact_fast
+"""
+MANA (Metric-Aware Neighborhood Aggregation) utilities.
 
-__all__ = ["plot_spatial_compact_fast"]
+This package provides tools for distance-weighted neighborhood aggregation
+and spatial visualization of spatial transcriptomics data.
+"""
+
+from .aggregate_neighbors_weighted import aggregate_neighbors_weighted
+from .plot_spatial_compact_fast import plot_spatial_compact_fast
+
+__all__ = [
+    'aggregate_neighbors_weighted',
+    'plot_spatial_compact_fast',
+]
+
+__version__ = '0.1.0'
