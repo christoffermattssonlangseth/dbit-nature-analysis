@@ -1,0 +1,53 @@
+# OS / editor noise
+.DS_Store
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.so
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+
+# Common large data formats (omics/spatial/tabular)
+*.csv
+*.tsv
+*.txt
+*.csv.gz
+*.tsv.gz
+*.txt.gz
+*.h5
+*.h5ad
+*.loom
+*.zarr
+*.parquet
+*.feather
+*.arrow
+*.mtx
+*.mtx.gz
+*.npy
+*.npz
+*.rds
+*.rda
+*.rdata
+
+# Compressed / archive payloads
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.gz
+*.bz2
+*.xz
+*.7z
+
+# Local data/output folders
+data/
+data-*/
+datasets/
+raw_data/
+results/
+outputs/
