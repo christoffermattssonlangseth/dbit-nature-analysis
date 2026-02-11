@@ -36,6 +36,23 @@ Fast, publication-quality spatial plotting with multi-panel layouts.
 - Ordered categorical support
 - Shared or per-panel color scales
 
+### dbit_rna_reader.py
+
+**Main function:** `read_dbit_rna_directory()`
+
+Loads DBiT-seq RNA matrix and tissue-position tar files from a directory and returns:
+- Concatenated multi-sample `AnnData`
+- Per-sample summary table (`sample_id`, `n_obs`, `n_vars`, `missing_barcodes`)
+
+Expected filename pattern per sample:
+- `<sample>_RNA_matrix.csv.tar`
+- `<sample>_tissue_positions_list.csv.tar`
+
+ATAC helpers in the same module:
+- `discover_atac_fragment_tars(data_dir, sample_ids=None)` to detect available ATAC tar files.
+- `extract_atac_fragment_archives(out_dir, atac_manifest=...)` to extract `.tsv.gz/.tbi`.
+- `import_atac_fragments_with_snap(atac_manifest, genome=...)` to import into SnapATAC2.
+
 **Key Parameters:**
 - `color` (str): obs column name or gene name
 - `groupby` (str): Column to group panels by (e.g., 'sample_id')
@@ -61,6 +78,12 @@ from plot_spatial_compact_fast import plot_spatial_compact_fast
 ```python
 # If using as installed package
 from utils import aggregate_neighbors_weighted, plot_spatial_compact_fast
+from utils import (
+    discover_atac_fragment_tars,
+    extract_atac_fragment_archives,
+    import_atac_fragments_with_snap,
+    read_dbit_rna_directory,
+)
 ```
 
 ## Example Workflow
