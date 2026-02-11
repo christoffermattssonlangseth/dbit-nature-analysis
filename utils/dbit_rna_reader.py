@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import tarfile
+from gc import collect as gc_collect
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
@@ -57,11 +58,13 @@ def read_csv_from_tar_local(
 def discover_rna_tissue_pairs(
     data_dir: str | Path,
     pattern: re.Pattern[str] = PAIR_PATTERN,
+    recursive: bool = True,
 ) -> dict[str, dict[str, Path]]:
     """Discover sample pairs keyed by sample_id from a directory of tar files."""
     data_dir = Path(data_dir)
     pairs: dict[str, dict[str, Path]] = {}
-    for tar_path in sorted(data_dir.glob("*.tar")):
+    iterator = data_dir.rglob("*.tar") if recursive else data_dir.glob("*.tar")
+    for tar_path in sorted(iterator):
         match = pattern.match(tar_path.name)
         if match is None:
             continue
@@ -75,6 +78,7 @@ def discover_atac_fragment_tars(
     data_dir: str | Path,
     sample_ids: Iterable[str] | None = None,
     pattern: re.Pattern[str] = ATAC_TAR_PATTERN,
+    recursive: bool = True,
 ) -> pd.DataFrame:
     """Discover ATAC fragment tar files and return one best tar per sample.
 
@@ -86,7 +90,8 @@ def discover_atac_fragment_tars(
     sample_filter = {str(s) for s in sample_ids} if sample_ids is not None else None
 
     by_sample: dict[str, dict[str, Path]] = {}
-    for tar_path in sorted(data_dir.glob("*.tar")):
+    iterator = data_dir.rglob("*.tar") if recursive else data_dir.glob("*.tar")
+    for tar_path in sorted(iterator):
         match = pattern.match(tar_path.name)
         if match is None:
             continue
@@ -135,6 +140,7 @@ def extract_atac_fragment_archives(
     data_dir: str | Path | None = None,
     sample_ids: Iterable[str] | None = None,
     overwrite: bool = False,
+    recursive: bool = True,
 ) -> pd.DataFrame:
     """Extract fragment files from tar archives and return a local file manifest.
 
@@ -143,7 +149,11 @@ def extract_atac_fragment_archives(
     if atac_manifest is None:
         if data_dir is None:
             raise ValueError("Provide either atac_manifest or data_dir.")
-        atac_manifest = discover_atac_fragment_tars(data_dir=data_dir, sample_ids=sample_ids)
+        atac_manifest = discover_atac_fragment_tars(
+            data_dir=data_dir,
+            sample_ids=sample_ids,
+            recursive=recursive,
+        )
 
     out_dir = Path(out_dir)
     rows: list[dict[str, str]] = []
@@ -221,7 +231,7 @@ def import_atac_fragments_with_snap(
         kwargs["sorted_by_barcode"] = sorted_by_barcode
 
         if whitelist_by_sample is not None and sample_id in whitelist_by_sample:
-            kwargs["whitelist"] = list(whitelist_by_sample[sample_id])
+            kwargs["whitelist"] = _expand_barcode_whitelist(whitelist_by_sample[sample_id])
 
         try:
             adata_atac = snap.pp.import_data(
@@ -245,6 +255,35 @@ def import_atac_fragments_with_snap(
         sample_adatas[sample_id] = adata_atac
 
     return sample_adatas
+
+
+def _expand_barcode_whitelist(raw_whitelist: Iterable[str]) -> list[str]:
+    expanded = set()
+    for value in raw_whitelist:
+        barcode = str(value).strip()
+        if not barcode:
+            continue
+        expanded.add(barcode)
+        # Many fragment files use a `-1` barcode suffix.
+        if "-" not in barcode:
+            expanded.add(f"{barcode}-1")
+    return sorted(expanded)
+
+
+def _write_h5ad_like(adata_obj, out_path: str | Path) -> None:
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if hasattr(adata_obj, "write_h5ad"):
+        adata_obj.write_h5ad(str(out_path))
+        return
+    if hasattr(adata_obj, "write"):
+        adata_obj.write(str(out_path))
+        return
+
+    raise AttributeError(
+        f"Object of type {type(adata_obj).__name__} has neither write_h5ad nor write method."
+    )
 
 
 def _build_sample_adata(
@@ -278,6 +317,8 @@ def _build_sample_adata(
         raise ValueError(f"No overlapping barcodes for sample '{sample_id}'")
 
     obs = obs_df.loc[common_barcodes].copy()
+    # Keep the original barcode explicitly; some downstream steps rely on it.
+    obs["barcode"] = obs.index.astype(str)
     var = pd.DataFrame(index=expr_df.columns.astype(str))
     X = sparse.csr_matrix(expr_df.loc[common_barcodes].to_numpy())
 
@@ -350,6 +391,210 @@ def read_dbit_rna_directory(
     return adata_multi, summary
 
 
+def write_rna_h5ad_per_sample(
+    data_dir: str | Path,
+    out_dir: str | Path,
+    sample_ids: Iterable[str] | None = None,
+    overwrite: bool = False,
+    recursive: bool = True,
+) -> pd.DataFrame:
+    """Build and write one RNA AnnData h5ad per sample.
+
+    Returns a manifest with one row per sample and paths to written files.
+    """
+    data_dir = Path(data_dir)
+    out_dir = Path(out_dir)
+    pairs = discover_rna_tissue_pairs(data_dir=data_dir, recursive=recursive)
+    required = {"RNA_matrix", "tissue_positions_list"}
+
+    available = sorted(
+        sample_id for sample_id, files in pairs.items() if required.issubset(files)
+    )
+    if sample_ids is None:
+        selected = available
+    else:
+        selected_set = {str(sample_id) for sample_id in sample_ids}
+        selected = [sample_id for sample_id in available if sample_id in selected_set]
+
+    if not selected:
+        raise ValueError(f"No matching complete RNA+tissue sample pairs found in {data_dir}")
+
+    rows: list[dict[str, str | int]] = []
+    for sample_id in selected:
+        rna_tar = pairs[sample_id]["RNA_matrix"]
+        tissue_tar = pairs[sample_id]["tissue_positions_list"]
+        out_path = out_dir / f"{sample_id}.rna.h5ad"
+        status = "skipped_existing"
+        n_obs = -1
+        n_vars = -1
+
+        if overwrite or not out_path.exists():
+            adata_sample = _build_sample_adata(sample_id, rna_tar, tissue_tar)
+            n_obs = int(adata_sample.n_obs)
+            n_vars = int(adata_sample.n_vars)
+            _write_h5ad_like(adata_sample, out_path)
+            del adata_sample
+            gc_collect()
+            status = "written_empty" if n_obs == 0 else "written"
+        else:
+            try:
+                import anndata as ad
+
+                adata_existing = ad.read_h5ad(str(out_path), backed="r")
+                n_obs = int(adata_existing.n_obs)
+                n_vars = int(adata_existing.n_vars)
+                try:
+                    adata_existing.file.close()
+                except Exception:
+                    pass
+                status = "skipped_existing_empty" if n_obs == 0 else "skipped_existing"
+            except Exception:
+                status = "skipped_existing"
+
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "status": status,
+                "rna_h5ad": str(out_path),
+                "rna_tar": str(rna_tar),
+                "tissue_positions_tar": str(tissue_tar),
+                "n_obs": n_obs,
+                "n_vars": n_vars,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("sample_id").reset_index(drop=True)
+
+
+def import_atac_fragments_to_h5ad_per_sample(
+    out_dir: str | Path,
+    genome,
+    atac_manifest: pd.DataFrame | None = None,
+    data_dir: str | Path | None = None,
+    sample_ids: Iterable[str] | None = None,
+    whitelist_by_sample: dict[str, Iterable[str]] | None = None,
+    sorted_by_barcode: bool = False,
+    overwrite: bool = False,
+    recursive: bool = True,
+    continue_on_error: bool = False,
+    build_tile_matrix: bool = True,
+    **import_kwargs,
+) -> pd.DataFrame:
+    """Import ATAC fragments one sample at a time and write one h5ad per sample.
+
+    Returns a manifest with written paths and status per sample.
+    """
+    import snapatac2 as snap
+
+    if atac_manifest is None:
+        if data_dir is None:
+            raise ValueError("Provide either atac_manifest or data_dir.")
+        atac_manifest = discover_atac_fragment_tars(
+            data_dir=data_dir,
+            sample_ids=sample_ids,
+            recursive=recursive,
+        )
+
+    out_dir = Path(out_dir)
+    rows: list[dict[str, str | int]] = []
+
+    for row in atac_manifest.itertuples(index=False):
+        sample_id = str(row.sample_id)
+        fragment_file = str(row.fragments_tsv_gz)
+        out_path = out_dir / f"{sample_id}.atac.h5ad"
+
+        if out_path.exists() and not overwrite:
+            n_obs = -1
+            n_vars = -1
+            status = "skipped_existing"
+            try:
+                import anndata as ad
+
+                adata_existing = ad.read_h5ad(str(out_path), backed="r")
+                n_obs = int(adata_existing.n_obs)
+                n_vars = int(adata_existing.n_vars)
+                try:
+                    adata_existing.file.close()
+                except Exception:
+                    pass
+                status = "skipped_existing_empty" if n_obs == 0 else "skipped_existing"
+            except Exception:
+                pass
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "status": status,
+                    "atac_h5ad": str(out_path),
+                    "fragments_tsv_gz": fragment_file,
+                    "n_obs": n_obs,
+                    "n_vars": n_vars,
+                    "error": "",
+                }
+            )
+            continue
+
+        kwargs = dict(import_kwargs)
+        kwargs["sorted_by_barcode"] = sorted_by_barcode
+        if whitelist_by_sample is not None and sample_id in whitelist_by_sample:
+            kwargs["whitelist"] = _expand_barcode_whitelist(whitelist_by_sample[sample_id])
+
+        try:
+            try:
+                adata_atac = snap.pp.import_data(
+                    fragment_file=fragment_file,
+                    chrom_sizes=genome,
+                    **kwargs,
+                )
+            except TypeError:
+                adata_atac = snap.pp.import_data(
+                    fragment_file=fragment_file,
+                    genome=genome,
+                    **kwargs,
+                )
+
+            if build_tile_matrix and getattr(adata_atac, "X", None) is None:
+                snap.pp.add_tile_matrix(adata_atac)
+
+            if hasattr(adata_atac, "uns"):
+                adata_atac.uns["sample_id"] = sample_id
+                adata_atac.uns.setdefault("source_paths", {})
+                adata_atac.uns["source_paths"]["fragments_tsv_gz"] = fragment_file
+
+            n_obs = int(getattr(adata_atac, "n_obs", -1))
+            n_vars = int(getattr(adata_atac, "n_vars", -1))
+            _write_h5ad_like(adata_atac, out_path)
+            del adata_atac
+            gc_collect()
+
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "status": "written_empty" if n_obs == 0 else "written",
+                    "atac_h5ad": str(out_path),
+                    "fragments_tsv_gz": fragment_file,
+                    "n_obs": n_obs,
+                    "n_vars": n_vars,
+                    "error": "",
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "status": "error",
+                    "atac_h5ad": str(out_path),
+                    "fragments_tsv_gz": fragment_file,
+                    "n_obs": -1,
+                    "n_vars": -1,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            if not continue_on_error:
+                raise
+
+    return pd.DataFrame(rows).sort_values("sample_id").reset_index(drop=True)
+
+
 __all__ = [
     "ATAC_KIND_PRIORITY",
     "ATAC_TAR_PATTERN",
@@ -358,7 +603,9 @@ __all__ = [
     "discover_atac_fragment_tars",
     "discover_rna_tissue_pairs",
     "extract_atac_fragment_archives",
+    "import_atac_fragments_to_h5ad_per_sample",
     "import_atac_fragments_with_snap",
     "read_csv_from_tar_local",
     "read_dbit_rna_directory",
+    "write_rna_h5ad_per_sample",
 ]

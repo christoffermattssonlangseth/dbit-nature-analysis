@@ -52,6 +52,8 @@ ATAC helpers in the same module:
 - `discover_atac_fragment_tars(data_dir, sample_ids=None)` to detect available ATAC tar files.
 - `extract_atac_fragment_archives(out_dir, atac_manifest=...)` to extract `.tsv.gz/.tbi`.
 - `import_atac_fragments_with_snap(atac_manifest, genome=...)` to import into SnapATAC2.
+- `write_rna_h5ad_per_sample(data_dir, out_dir, ...)` to checkpoint RNA as one h5ad per sample.
+- `import_atac_fragments_to_h5ad_per_sample(out_dir, genome=..., ...)` to checkpoint ATAC as one h5ad per sample without loading all samples into memory.
 
 **Key Parameters:**
 - `color` (str): obs column name or gene name
@@ -81,8 +83,10 @@ from utils import aggregate_neighbors_weighted, plot_spatial_compact_fast
 from utils import (
     discover_atac_fragment_tars,
     extract_atac_fragment_archives,
+    import_atac_fragments_to_h5ad_per_sample,
     import_atac_fragments_with_snap,
     read_dbit_rna_directory,
+    write_rna_h5ad_per_sample,
 )
 ```
 
